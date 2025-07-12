@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import os
 import logging
+from werkzeug.exceptions import RequestEntityTooLarge
 from modules.analyze_stl import analyze_stl, allowed_file
 from modules.pricing import calculate_price
 from modules.order_handler import handle_order
@@ -12,7 +13,14 @@ from db import DBConn
 
 app = Flask(__name__)
 CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB for large files
+
+# Increase file size limits - Railway supports up to 500MB
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB for very large files
+app.config['MAX_CONTENT_PATH'] = None
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 db_conn = DBConn()
 emailer = Emailer(
@@ -41,18 +49,18 @@ def upload():
         file_size = file.tell()
         file.seek(0)  # Reset to beginning
         
-        logging.info(f"Uploading file: {file.filename}, size: {file_size / 1024 / 1024:.2f} MB")
+        logger.info(f"Uploading file: {file.filename}, size: {file_size / 1024 / 1024:.2f} MB")
         
         # Check if file is too large and needs optimization
         if file_size > 100 * 1024 * 1024:  # 100MB
-            logging.info("File is large, attempting optimization...")
+            logger.info("File is large, attempting optimization...")
             
             try:
                 # Optimize the mesh file
                 optimized_path, was_optimized, original_size, optimized_size = mesh_optimizer.optimize_mesh_file(file)
                 
                 if was_optimized:
-                    logging.info(f"File optimized: {original_size / 1024 / 1024:.2f} MB -> {optimized_size / 1024 / 1024:.2f} MB")
+                    logger.info(f"File optimized: {original_size / 1024 / 1024:.2f} MB -> {optimized_size / 1024 / 1024:.2f} MB")
                     
                     # Create a new file object from the optimized file
                     with open(optimized_path, 'rb') as f:
@@ -78,13 +86,13 @@ def upload():
                     return jsonify({"success": True, **result})
                 else:
                     # Optimization failed, try with original file
-                    logging.warning("Mesh optimization failed, trying with original file")
+                    logger.warning("Mesh optimization failed, trying with original file")
                     file.seek(0)  # Reset file pointer
                     result = analyze_stl(file)
                     return jsonify({"success": True, **result})
                     
             except Exception as opt_error:
-                logging.error(f"Optimization error: {str(opt_error)}")
+                logger.error(f"Optimization error: {str(opt_error)}")
                 # If optimization fails, try with original file
                 file.seek(0)  # Reset file pointer
                 result = analyze_stl(file)
@@ -95,7 +103,7 @@ def upload():
             return jsonify({"success": True, **result})
             
     except Exception as e:
-        logging.error(f"Upload error: {str(e)}")
+        logger.error(f"Upload error: {str(e)}")
         return jsonify(success=False, message=f"Lỗi xử lý file: {str(e)}"), 500
 
 @app.route('/analyze', methods=['POST'])
@@ -135,6 +143,17 @@ def order():
         return jsonify(result)
     else:
         return jsonify(result), 400
+
+# Error handlers for file size issues
+@app.errorhandler(413)
+def too_large(e):
+    """Handle file too large errors"""
+    return jsonify(success=False, message="File quá lớn. Kích thước tối đa là 500MB. Vui lòng thử nén file hoặc chia nhỏ file."), 413
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(e):
+    """Handle Werkzeug file too large errors"""
+    return jsonify(success=False, message="File quá lớn. Kích thước tối đa là 500MB. Vui lòng thử nén file hoặc chia nhỏ file."), 413
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
