@@ -143,89 +143,43 @@ def price():
 
 @app.route('/order', methods=['POST'])
 def order():
-    """Process order with Cloudinary URLs"""
+    """Process order with Cloudinary URLs and pre-analyzed file data from frontend."""
     try:
         data = request.get_json()
         if not data:
             return jsonify(success=False, message="Không có dữ liệu JSON."), 400
         
-        logger.info("Processing order with Cloudinary URLs")
+        logger.info("Processing order with Cloudinary URLs and frontend-provided analysis data.")
         
-        # Extract file URLs from order data
-        file_urls = data.get('file_urls', [])
-        files_info = data.get('files', [])
+        # Extract file URLs and file analysis information from order data
+        # Frontend now sends 'files' array with 'mass_grams' and 'volume_cm3'
+        files_from_frontend = data.get('files', []) 
+        file_urls = data.get('file_urls', []) # This is primarily for record-keeping
         
-        if not file_urls:
-            return jsonify(success=False, message="Không có file URLs trong đơn hàng."), 400
+        if not files_from_frontend:
+            return jsonify(success=False, message="Không có thông tin file trong đơn hàng."), 400
         
-        logger.info(f"Order contains {len(file_urls)} files")
+        logger.info(f"Order contains {len(files_from_frontend)} files with pre-analyzed data.")
         
-        # Process each file URL to get mass and volume
-        processed_files = []
         total_mass = 0
         total_volume = 0
         
-        for i, file_url in enumerate(file_urls):
-            try:
-                logger.info(f"Processing file {i+1}/{len(file_urls)}: {file_url}")
-                
-                # Download and analyze file
-                response = requests.get(file_url, timeout=60)
-                if not response.ok:
-                    logger.error(f"Failed to download file {i+1}: {response.status_code}")
-                    continue
-                
-                # Create temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.stl') as temp_file:
-                    temp_file.write(response.content)
-                    temp_file_path = temp_file.name
-                
-                try:
-                    # Analyze the file
-                    with open(temp_file_path, 'rb') as f:
-                        from werkzeug.datastructures import FileStorage
-                        file_storage = FileStorage(
-                            stream=f,
-                            filename=f'file_{i+1}.stl',
-                            content_type='application/octet-stream'
-                        )
-                        analysis_result = analyze_stl(file_storage)
-                    
-                    # Get file info
-                    file_info = files_info[i] if i < len(files_info) else {}
-                    file_name = file_info.get('name', f'file_{i+1}')
-                    file_size = file_info.get('size', 0)
-                    
-                    processed_file = {
-                        'name': file_name,
-                        'size': file_size,
-                        'cloudinary_url': file_url,
-                        'mass_grams': analysis_result['mass_grams'],
-                        'volume_cm3': analysis_result['volume_cm3'],
-                        'dimensions_mm': analysis_result['dimensions_mm']
-                    }
-                    
-                    processed_files.append(processed_file)
-                    total_mass += analysis_result['mass_grams']
-                    total_volume += analysis_result['volume_cm3']
-                    
-                    logger.info(f"File {file_name} processed: {analysis_result['mass_grams']}g, {analysis_result['volume_cm3']}cm³")
-                    
-                finally:
-                    # Clean up temporary file
-                    try:
-                        os.unlink(temp_file_path)
-                    except:
-                        pass
-                        
-            except Exception as e:
-                logger.error(f"Error processing file {i+1}: {e}")
-                continue
+        # Use the mass_grams and volume_cm3 directly from the frontend data
+        for file_info in files_from_frontend:
+            mass = file_info.get('mass_grams')
+            volume = file_info.get('volume_cm3')
+            
+            if mass is None or volume is None:
+                logger.warning(f"File {file_info.get('name', 'unknown')} is missing mass_grams or volume_cm3. Skipping for total calculation.")
+                continue # Skip this file if crucial data is missing
+            
+            total_mass += mass
+            total_volume += volume
+            
+        if total_mass == 0 and total_volume == 0:
+            return jsonify(success=False, message="Không có dữ liệu khối lượng/thể tích hợp lệ từ các file."), 400
         
-        if not processed_files:
-            return jsonify(success=False, message="Không thể xử lý bất kỳ file nào."), 400
-        
-        # Calculate price
+        # Calculate price based on the total mass from frontend analysis
         technology = data.get('technology')
         color = data.get('color')
         resolution = data.get('resolution')
@@ -236,22 +190,22 @@ def order():
         material = 'PLA' if technology == 'FDM' else 'Resin'
         price_result = calculate_price(total_mass, technology, material)
         
-        # Prepare order data for backend processing
+        # Prepare final order data for the order handler
         order_data = {
             'name': data.get('name', ''),
             'phone': data.get('phone', ''),
             'address': data.get('address', ''),
             'email': data.get('email', ''),
-            'files': processed_files,
-            'file_urls': file_urls,
+            'files': files_from_frontend, # Use the files array directly from frontend
+            'file_urls': file_urls, # Keep the list of Cloudinary URLs
             'technology': technology,
             'color': color,
             'resolution': resolution,
             'total_mass': total_mass,
             'total_volume': total_volume,
             'price': price_result.get('price', 0),
-            'quote': {
-                'filename': ', '.join([f['name'] for f in processed_files]),
+            'quote': { # Ensure quote structure matches handle_order's expectation
+                'filename': ', '.join([f.get('name', '') for f in files_from_frontend]),
                 'mass_grams': total_mass,
                 'volume_cm3': total_volume,
                 'technology': technology,
@@ -263,7 +217,7 @@ def order():
             }
         }
         
-        logger.info(f"Order processed: {len(processed_files)} files, {total_mass}g, ${price_result.get('price', 0)}")
+        logger.info(f"Order prepared for handler: {len(files_from_frontend)} files, {total_mass}g, ${price_result.get('price', 0)}")
         
         # Send to order handler
         if not handle_order:
@@ -292,4 +246,4 @@ def test():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Starting Flask app on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=True) 
+    app.run(host='0.0.0.0', port=port, debug=True)
